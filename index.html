@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>祖玛大冒险 · Zuma</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: radial-gradient(ellipse at center, #1b2a4a 0%, #0a1128 70%);
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block;
+    border-radius: 14px;
+    box-shadow: 0 0 60px rgba(80, 140, 255, .25), 0 20px 60px rgba(0,0,0,.6);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(6, 12, 30, .82);
+    border-radius: 14px;
+    color: #fff; text-align: center;
+    backdrop-filter: blur(4px);
+    transition: opacity .3s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay h1 {
+    font-size: 52px; letter-spacing: 8px; margin-bottom: 10px;
+    background: linear-gradient(180deg, #ffe259, #ffa751);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 4px 20px rgba(255, 167, 81, .3);
+  }
+  #overlay p { color: #aabbdd; line-height: 1.9; font-size: 15px; margin-bottom: 26px; }
+  #overlay .btn {
+    padding: 13px 46px; font-size: 19px; letter-spacing: 4px;
+    color: #2a1500; font-weight: bold;
+    background: linear-gradient(180deg, #ffe259, #ffa751);
+    border: none; border-radius: 999px; cursor: pointer;
+    box-shadow: 0 6px 24px rgba(255, 167, 81, .45);
+    transition: transform .15s;
+  }
+  #overlay .btn:hover { transform: scale(1.06); }
+  #overlay .score-line { font-size: 22px; color: #ffe259; margin-bottom: 18px; }
+  kbd {
+    background: #26355e; border-radius: 5px; padding: 2px 8px;
+    font-family: inherit; color: #cfe0ff; border: 1px solid #3b4f86;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="720"></canvas>
+  <div id="overlay">
+    <h1>祖玛大冒险</h1>
+    <p>
+      移动鼠标瞄准 · <kbd>左键</kbd> 发射彩球<br>
+      <kbd>右键</kbd> 或 <kbd>空格</kbd> 交换当前球与下一颗球<br>
+      三个及以上同色球相连即可消除<br>
+      别让球链滚进中心的洞穴！
+    </p>
+    <div class="score-line" id="overlayScore" style="display:none"></div>
+    <button class="btn" id="startBtn">开始游戏</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const CX = W / 2, CY = H / 2;
+
+  const BALL_R = 14;
+  const DIAM = BALL_R * 2 - 1;
+
+  const COLORS = [
+    { main: '#e74c3c', light: '#ff9a8b', dark: '#8e2318' }, // 红
+    { main: '#f1c40f', light: '#ffe98a', dark: '#8f7207' }, // 黄
+    { main: '#3498db', light: '#9fd4f5', dark: '#1a5b8c' }, // 蓝
+    { main: '#2ecc71', light: '#a0f0c0', dark: '#157a44' }, // 绿
+    { main: '#9b59b6', light: '#d3aef0', dark: '#5e2f73' }, // 紫
+  ];
+
+  const LEVELS = [
+    { total: 40, speed: 26, colors: 4 },
+    { total: 55, speed: 34, colors: 5 },
+    { total: 70, speed: 43, colors: 5 },
+  ];
+
+  // ---------- 路径：向内螺旋 ----------
+  const path = [];
+  (function buildPath() {
+    const turns = 3.15;
+    const thetaMax = turns * Math.PI * 2;
+    const startR = Math.min(W, H) * 0.46;
+    const endR = 62;
+    const startAngle = -Math.PI / 2;
+    const N = 2600;
+    let px = 0, py = 0, acc = 0;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const th = startAngle + t * thetaMax;
+      const r = startR - (startR - endR) * t;
+      const x = CX + Math.cos(th) * r * 1.12; // 横向略拉伸
+      const y = CY + Math.sin(th) * r * 0.92;
+      if (i > 0) acc += Math.hypot(x - px, y - py);
+      path.push({ x, y, d: acc });
+      px = x; py = y;
+    }
+  })();
+  const PATH_LEN = path[path.length - 1].d;
+
+  function pointAt(d) {
+    if (d <= 0) return path[0];
+    if (d >= PATH_LEN) return path[path.length - 1];
+    let lo = 0, hi = path.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (path[mid].d < d) lo = mid + 1; else hi = mid;
+    }
+    const b = path[lo], a = path[lo - 1] || b;
+    const t = (d - a.d) / ((b.d - a.d) || 1);
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  }
+
+  function nearestPathD(x, y) {
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < path.length; i += 4) {
+      const dx = path[i].x - x, dy = path[i].y - y;
+      const dd = dx * dx + dy * dy;
+      if (dd < bestDist) { bestDist = dd; best = i; }
+    }
+    return path[best].d;
+  }
+
+  // ---------- 游戏状态 ----------
+  let balls = [];          // {d, color} 按 d 从大到小（队首在前）
+  let spawnLeft = 0;
+  let projectiles = [];
+  let particles = [];
+  let floatingTexts = [];
+  let curColor = 0, nextColor = 1;
+  let score = 0, level = 0;
+  let state = 'menu';      // menu | playing | over | win | levelclear
+  let mouse = { x: CX, y: 0 };
+  let slowTimer = 0;
+
+  const randColor = () => (Math.random() * LEVELS[level].colors) | 0;
+
+  function startLevel(lv) {
+    level = lv;
+    balls = [];
+    projectiles = [];
+    particles = [];
+    floatingTexts = [];
+    spawnLeft = LEVELS[lv].total;
+    curColor = randColor();
+    nextColor = randColor();
+    state = 'playing';
+  }
+
+  // ---------- 球链推进 ----------
+  function updateChain(dt) {
+    const L = LEVELS[level];
+    const speed = slowTimer > 0 ? L.speed * 0.35 : L.speed;
+    if (slowTimer > 0) slowTimer -= dt;
+
+    // 生成新球（队尾在 d 最小处）
+    if (spawnLeft > 0) {
+      const tail = balls[balls.length - 1];
+      if (!tail || tail.d >= DIAM) {
+        let c = randColor();
+        // 避免开局生成过多同色
+        balls.push({ d: tail ? tail.d - DIAM : 0, color: c });
+        spawnLeft--;
+      }
+    }
+
+    if (balls.length === 0) {
+      if (spawnLeft === 0 && state === 'playing') {
+        state = 'levelclear';
+        score += 500;
+        setTimeout(() => {
+          if (level + 1 < LEVELS.length) startLevel(level + 1);
+          else { state = 'win'; showOverlay('win'); }
+        }, 900);
+      }
+      return;
+    }
+
+    // 队首前进
+    balls[0].d += speed * dt;
+    if (balls[0].d >= PATH_LEN - BALL_R) {
+      state = 'over';
+      showOverlay('over');
+      return;
+    }
+
+    // 后续球：间隙大则快速追上，间隙小则贴紧
+    for (let i = 1; i < balls.length; i++) {
+      const gap = balls[i - 1].d - balls[i].d;
+      if (gap > DIAM) {
+        const before = gap;
+        balls[i].d += Math.max(speed * 3.2, (gap - DIAM) * 8) * dt;
+        if (balls[i - 1].d - balls[i].d <= DIAM && before > DIAM + 1) {
+          balls[i].d = balls[i - 1].d - DIAM;
+          checkMatchAt(i); // 缝隙闭合，检查连锁
+        }
+      } else if (gap < DIAM) {
+        balls[i].d = balls[i - 1].d - DIAM;
+      }
+    }
+  }
+
+  // ---------- 消除判定 ----------
+  function checkMatchAt(idx) {
+    if (idx < 0 || idx >= balls.length) return false;
+    const c = balls[idx].color;
+    let lo = idx, hi = idx;
+    while (lo > 0 && balls[lo - 1].color === c && Math.abs(balls[lo - 1].d - balls[lo].d) < DIAM + 2) lo--;
+    while (hi < balls.length - 1 && balls[hi + 1].color === c && Math.abs(balls[hi].d - balls[hi + 1].d) < DIAM + 2) hi++;
+    const count = hi - lo + 1;
+    if (count >= 3) {
+      const mid = balls[(lo + hi) >> 1];
+      const p = pointAt(mid.d);
+      for (let i = lo; i <= hi; i++) {
+        const bp = pointAt(balls[i].d);
+        burst(bp.x, bp.y, COLORS[c].main);
+      }
+      const gained = count * 10 + (count - 3) * 20;
+      score += gained;
+      floatingTexts.push({ x: p.x, y: p.y, text: '+' + gained, life: 1 });
+      balls.splice(lo, count);
+      slowTimer = 0.9; // 消除后短暂减速，爽感
+      return true;
+    }
+    return false;
+  }
+
+  // ---------- 发射与插入 ----------
+  function shoot() {
+    if (state !== 'playing' || projectiles.length >= 3) return;
+    const ang = Math.atan2(mouse.y - CY, mouse.x - CX);
+    projectiles.push({
+      x: CX + Math.cos(ang) * 34,
+      y: CY + Math.sin(ang) * 34,
+      vx: Math.cos(ang) * 620,
+      vy: Math.sin(ang) * 620,
+      color: curColor,
+    });
+    curColor = nextColor;
+    nextColor = randColor();
+  }
+
+  function swapBalls() {
+    if (state !== 'playing') return;
+    [curColor, nextColor] = [nextColor, curColor];
+  }
+
+  function updateProjectiles(dt) {
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.x < -30 || p.x > W + 30 || p.y < -30 || p.y > H + 30) {
+        projectiles.splice(i, 1);
+        continue;
+      }
+      // 碰撞检测
+      for (let j = 0; j < balls.length; j++) {
+        const bp = pointAt(balls[j].d);
+        if (Math.hypot(bp.x - p.x, bp.y - p.y) < DIAM - 3) {
+          insertBall(p, j);
+          projectiles.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
+
+  function insertBall(p, hitIdx) {
+    const dHit = nearestPathD(p.x, p.y);
+    // 找到插入位置（balls 按 d 降序）
+    let idx = balls.findIndex(b => b.d < dHit);
+    if (idx === -1) idx = balls.length;
+    const nb = { d: dHit, color: p.color };
+    balls.splice(idx, 0, nb);
+    // 向队首方向推开重叠
+    for (let j = idx; j > 0; j--) {
+      if (balls[j - 1].d - balls[j].d < DIAM) balls[j - 1].d = balls[j].d + DIAM;
+    }
+    // 向队尾方向推开重叠
+    for (let j = idx; j < balls.length - 1; j++) {
+      if (balls[j].d - balls[j + 1].d < DIAM) balls[j + 1].d = balls[j].d - DIAM;
+    }
+    if (balls[0].d >= PATH_LEN - BALL_R) { state = 'over'; showOverlay('over'); return; }
+    checkMatchAt(idx);
+  }
+
+  // ---------- 特效 ----------
+  function burst(x, y, color) {
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 60 + Math.random() * 160;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: 0.6 + Math.random() * 0.4,
+        color, r: 2 + Math.random() * 3.5,
+      });
+    }
+  }
+
+  function updateFx(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.96; p.vy *= 0.96;
+      p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+      const t = floatingTexts[i];
+      t.y -= 40 * dt;
+      t.life -= dt * 0.8;
+      if (t.life <= 0) floatingTexts.splice(i, 1);
+    }
+  }
+
+  // ---------- 绘制 ----------
+  function drawBall(x, y, ci, r = BALL_R) {
+    const c = COLORS[ci];
+    const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.15, x, y, r);
+    g.addColorStop(0, c.light);
+    g.addColorStop(0.55, c.main);
+    g.addColorStop(1, c.dark);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.beginPath();
+    ctx.arc(x - r * 0.34, y - r * 0.4, r * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    // 背景
+    ctx.clearRect(0, 0, W, H);
+    const bg = ctx.createRadialGradient(CX, CY, 60, CX, CY, W * 0.6);
+    bg.addColorStop(0, '#22335c');
+    bg.addColorStop(1, '#0c1533');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // 轨道
+    ctx.strokeStyle = 'rgba(255,255,255,.09)';
+    ctx.lineWidth = DIAM + 6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(path[0].x, path[0].y);
+    for (let i = 8; i < path.length; i += 8) ctx.lineTo(path[i].x, path[i].y);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,.35)';
+    ctx.lineWidth = DIAM - 2;
+    ctx.stroke();
+
+    // 终点洞穴
+    const hole = path[path.length - 1];
+    const hg = ctx.createRadialGradient(hole.x, hole.y, 4, hole.x, hole.y, 34);
+    hg.addColorStop(0, '#000');
+    hg.addColorStop(0.7, '#0a0a1a');
+    hg.addColorStop(1, 'rgba(231,76,60,.55)');
+    ctx.fillStyle = hg;
+    ctx.beginPath();
+    ctx.arc(hole.x, hole.y, 32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(231,76,60,.8)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // 球链（先画队尾）
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const p = pointAt(balls[i].d);
+      drawBall(p.x, p.y, balls[i].color);
+    }
+
+    // 发射的球
+    for (const p of projectiles) drawBall(p.x, p.y, p.color);
+
+    // 粒子
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(p.life, 0);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // 漂浮分数
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 20px "Microsoft YaHei", sans-serif';
+    for (const t of floatingTexts) {
+      ctx.globalAlpha = Math.max(t.life, 0);
+      ctx.fillStyle = '#ffe259';
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+
+    // 青蛙炮台
+    const ang = Math.atan2(mouse.y - CY, mouse.x - CX);
+    ctx.save();
+    ctx.translate(CX, CY);
+    // 底座
+    const fg = ctx.createRadialGradient(0, 0, 8, 0, 0, 40);
+    fg.addColorStop(0, '#7ec850');
+    fg.addColorStop(1, '#3d7a24');
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.arc(0, 0, 34, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2c5c18'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.rotate(ang);
+    // 炮管
+    ctx.fillStyle = '#3d7a24';
+    ctx.fillRect(8, -8, 34, 16);
+    // 眼睛
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-4, -24, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-4, 24, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1a1a2e';
+    ctx.beginPath(); ctx.arc(-2, -24, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-2, 24, 3.5, 0, Math.PI * 2); ctx.fill();
+    // 嘴里的当前球
+    drawBall(30, 0, curColor, 12);
+    ctx.restore();
+
+    // 下一颗球
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    ctx.font = '13px "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('下一个', CX - 62, CY + 42);
+    drawBall(CX - 62, CY + 20, nextColor, 10);
+
+    // HUD
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 22px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = '#ffe259';
+    ctx.fillText('得分  ' + score, 22, 38);
+    ctx.font = '16px "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = '#aabbdd';
+    ctx.fillText('关卡  ' + (level + 1) + ' / ' + LEVELS.length, 22, 64);
+    const remain = spawnLeft + balls.length;
+    ctx.textAlign = 'right';
+    ctx.fillText('剩余球数  ' + remain, W - 22, 38);
+  }
+
+  // ---------- 结束/胜利界面 ----------
+  const overlay = document.getElementById('overlay');
+  const overlayScore = document.getElementById('overlayScore');
+  const startBtn = document.getElementById('startBtn');
+  const overlayTitle = overlay.querySelector('h1');
+  const overlayDesc = overlay.querySelector('p');
+
+  function showOverlay(kind) {
+    overlay.classList.remove('hidden');
+    overlayScore.style.display = 'block';
+    if (kind === 'over') {
+      overlayTitle.textContent = '游戏结束';
+      overlayDesc.innerHTML = '球链滚进了洞穴……别灰心，再来一局！';
+      overlayScore.textContent = '最终得分：' + score;
+      startBtn.textContent = '重新开始';
+    } else if (kind === 'win') {
+      overlayTitle.textContent = '通关成功';
+      overlayDesc.innerHTML = '你守住了洞穴，消除了所有彩球！<br>可以把本页的网址发给老师交作业啦。';
+      overlayScore.textContent = '总得分：' + score + '（含通关奖励 500）';
+      startBtn.textContent = '再玩一次';
+    }
+  }
+
+  startBtn.addEventListener('click', () => {
+    score = 0;
+    overlay.classList.add('hidden');
+    startLevel(0);
+  });
+
+  // ---------- 输入 ----------
+  function setMouse(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = (clientX - r.left) * (W / r.width);
+    mouse.y = (clientY - r.top) * (H / r.height);
+  }
+  canvas.addEventListener('mousemove', e => setMouse(e.clientX, e.clientY));
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) shoot();
+    else if (e.button === 2) swapBalls();
+  });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const t = e.touches[0];
+    setMouse(t.clientX, t.clientY);
+    shoot();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    const t = e.touches[0];
+    setMouse(t.clientX, t.clientY);
+  }, { passive: false });
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); swapBalls(); }
+    if (e.code === 'KeyR' && (state === 'over' || state === 'win')) startBtn.click();
+  });
+
+  // ---------- 主循环 ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (state === 'playing' || state === 'levelclear') {
+      updateChain(dt);
+      updateProjectiles(dt);
+    }
+    updateFx(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
